@@ -10,6 +10,8 @@ from requests import Request
 import requests
 from msal import ConfidentialClientApplication
 from dotenv import load_dotenv
+from google.cloud import storage
+from google.api_core.exceptions import NotFound
 
 # ---------- Config ----------
 # Put these in environment variables or a secrets manager
@@ -26,7 +28,10 @@ TENANT_ID     = os.environ["TENANT_ID"]
 CLIENT_ID     = os.environ["CLIENT_ID"]
 CLIENT_SECRET = os.environ["CLIENT_SECRET"]
 MAILBOX       = os.environ["MAILBOX"]
-DOWNLOAD_DIR  = os.environ.get("DOWNLOAD_DIR", "./downloads")
+DOWNLOAD_DIR  = os.environ.get("DOWNLOAD_DIR", "./downloads").strip()
+if not DOWNLOAD_DIR:
+    DOWNLOAD_DIR = None
+GCS_BUCKET_NAME = os.environ["GCS_BUCKET_NAME"]
 
 GRAPH_SCOPE   = ["https://graph.microsoft.com/.default"]
 GRAPH_BASE    = "https://graph.microsoft.com/v1.0"
@@ -83,6 +88,21 @@ def graph_get_stream(session, url):
         r.raise_for_status()
         return r
 
+
+def get_gcs_bucket():
+    """Initialize a Google Cloud Storage bucket client using ADC/service account key."""
+    client = storage.Client()
+    try:
+        return client.get_bucket(GCS_BUCKET_NAME)
+    except NotFound as exc:
+        raise RuntimeError(f"GCS bucket '{GCS_BUCKET_NAME}' not found or inaccessible.") from exc
+
+
+def upload_pdf_to_bucket(bucket, blob_name, payload):
+    """Store the given PDF payload in Cloud Storage."""
+    blob = bucket.blob(blob_name)
+    blob.upload_from_string(payload, content_type="application/pdf")
+
 def compute_window_cet():
     """
     Return (start_utc_iso, end_utc_iso) for:
@@ -132,8 +152,8 @@ def list_messages_in_window(session, mailbox, start_iso_z, end_iso_z):
         if not url:
             break
 
-def download_pdf_attachments(session, mailbox, message, outdir):
-    """Download PDF attachments found in the message, returning count saved."""
+def download_pdf_attachments(session, mailbox, message, bucket, outdir=None):
+    """Download PDF attachments, optionally keep local copies, and upload to GCS."""
     if not message.get("hasAttachments"):
         return 0
     mid = message["id"]
@@ -156,9 +176,11 @@ def download_pdf_attachments(session, mailbox, message, outdir):
                         rdt = message.get("receivedDateTime", "").replace(":", "").replace("-", "")
                         subj = (message.get("subject") or "").strip().replace("/", "_")[:80]
                         fname = f"{rdt}__{subj}__{name}"
-                        fpath = os.path.join(outdir, fname)
-                        with open(fpath, "wb") as f:
-                            f.write(blob)
+                        if outdir:
+                            fpath = os.path.join(outdir, fname)
+                            with open(fpath, "wb") as f:
+                                f.write(blob)
+                        upload_pdf_to_bucket(bucket, fname, blob)
                         saved += 1
             # ItemAttachment could wrap an email with its own attachments; skip here or handle if needed.
 
@@ -170,25 +192,33 @@ def download_pdf_attachments(session, mailbox, message, outdir):
 
 def main():
     """Coordinate downloading PDF attachments across the scheduled time window."""
-    ensure_dir(DOWNLOAD_DIR)
+    local_dir = DOWNLOAD_DIR
+    if local_dir:
+        ensure_dir(local_dir)
     token = get_app_token()
     session = requests.Session()
     session.headers.update({"Authorization": f"Bearer {token}"})
+    bucket = get_gcs_bucket()
 
     start_iso_z, end_iso_z, start_local, end_local, now_local = compute_window_cet()
     print(f"[INFO] Window (Europe/Copenhagen): {start_local} → {end_local} (now={now_local})")
     print(f"[INFO] Window (UTC): {start_iso_z} → {end_iso_z}")
+    print(f"[INFO] Storage bucket: {GCS_BUCKET_NAME}")
+    if local_dir:
+        print(f"[INFO] Local cache directory: {os.path.abspath(local_dir)}")
 
     total_msgs = 0
     total_pdfs = 0
 
     for msg in list_messages_in_window(session, MAILBOX, start_iso_z, end_iso_z):
         total_msgs += 1
-        total_pdfs += download_pdf_attachments(session, MAILBOX, msg, DOWNLOAD_DIR)
+        total_pdfs += download_pdf_attachments(session, MAILBOX, msg, bucket, local_dir)
 
     print(f"[INFO] Messages scanned: {total_msgs}")
     print(f"[INFO] PDF attachments saved: {total_pdfs}")
-    print(f"[INFO] Output folder: {os.path.abspath(DOWNLOAD_DIR)}")
+    print(f"[INFO] Objects available in gs://{GCS_BUCKET_NAME}")
+    if local_dir:
+        print(f"[INFO] Local cache retained at: {os.path.abspath(local_dir)}")
 
 if __name__ == "__main__":
     main()
