@@ -103,6 +103,17 @@ def upload_pdf_to_bucket(bucket, blob_name, payload):
     blob = bucket.blob(blob_name)
     blob.upload_from_string(payload, content_type="application/pdf")
 
+
+def get_deleted_items_folder_id(session, mailbox):
+    """Return the folder ID of the Deleted Items well-known folder."""
+    url = f"{GRAPH_BASE}/users/{mailbox}/mailFolders/DeletedItems?$select=id"
+    data = graph_get(session, url)
+    folder_id = data.get("id")
+    if not folder_id:
+        raise RuntimeError("Unable to resolve Deleted Items folder ID.")
+    return folder_id
+
+
 def compute_window_cet():
     """
     Return (start_utc_iso, end_utc_iso) for:
@@ -132,13 +143,13 @@ def build_time_filter(start_iso_z, end_iso_z):
     return f"receivedDateTime ge {start_iso_z!r} and receivedDateTime lt {end_iso_z!r}"
 
 
-def list_messages_in_window(session, mailbox, start_iso_z, end_iso_z):
+def list_messages_in_window(session, mailbox, start_iso_z, end_iso_z, excluded_parent_ids=None):
     """Yield messages received within the provided UTC window for a mailbox."""
     flt = f"receivedDateTime ge {start_iso_z} and receivedDateTime lt {end_iso_z}"
     base = f"{GRAPH_BASE}/users/{mailbox}/messages"
     params = {
         "$filter":  flt,
-        "$select":  "id,subject,receivedDateTime,hasAttachments",
+        "$select":  "id,subject,receivedDateTime,hasAttachments,parentFolderId",
         "$orderby": "receivedDateTime desc",
         "$top":     "50",
     }
@@ -147,6 +158,8 @@ def list_messages_in_window(session, mailbox, start_iso_z, end_iso_z):
     while True:
         data = graph_get(session, url)
         for m in data.get("value", []):
+            if excluded_parent_ids and m.get("parentFolderId") in excluded_parent_ids:
+                continue
             yield m
         url = data.get("@odata.nextLink")
         if not url:
@@ -199,6 +212,7 @@ def main():
     session = requests.Session()
     session.headers.update({"Authorization": f"Bearer {token}"})
     bucket = get_gcs_bucket()
+    deleted_items_id = get_deleted_items_folder_id(session, MAILBOX)
 
     start_iso_z, end_iso_z, start_local, end_local, now_local = compute_window_cet()
     print(f"[INFO] Window (Europe/Copenhagen): {start_local} → {end_local} (now={now_local})")
@@ -210,7 +224,8 @@ def main():
     total_msgs = 0
     total_pdfs = 0
 
-    for msg in list_messages_in_window(session, MAILBOX, start_iso_z, end_iso_z):
+    excluded_ids = {deleted_items_id}
+    for msg in list_messages_in_window(session, MAILBOX, start_iso_z, end_iso_z, excluded_ids):
         total_msgs += 1
         total_pdfs += download_pdf_attachments(session, MAILBOX, msg, bucket, local_dir)
 
