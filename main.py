@@ -33,9 +33,11 @@ GRAPH_BASE    = "https://graph.microsoft.com/v1.0"
 
 # ---------- Helpers ----------
 def ensure_dir(path: str):
+    """Create the target directory if it does not already exist."""
     os.makedirs(path, exist_ok=True)
 
 def get_app_token() -> str:
+    """Return an application-only Microsoft Graph access token."""
     app = ConfidentialClientApplication(
         client_id=CLIENT_ID,
         client_credential=CLIENT_SECRET,
@@ -47,6 +49,7 @@ def get_app_token() -> str:
     return res["access_token"]
 
 def throttle_sleep(resp):
+    """Sleep for the duration suggested by Graph throttling headers."""
     # Simple backoff for 429/503
     retry_after = resp.headers.get("Retry-After")
     if retry_after and retry_after.isdigit():
@@ -55,6 +58,7 @@ def throttle_sleep(resp):
         time.sleep(3)
 
 def graph_get(session, url):
+    """Perform a GET against Graph, retrying throttled requests and returning JSON."""
     while True:
         r = session.get(url)
         if r.status_code in (429, 503, 504):
@@ -70,6 +74,7 @@ def graph_get(session, url):
 
 
 def graph_get_stream(session, url):
+    """Call Microsoft Graph and keep retrying until a streaming response succeeds."""
     while True:
         r = session.get(url, stream=True)
         if r.status_code in (429, 503, 504):
@@ -101,12 +106,14 @@ def compute_window_cet():
     return start_utc, end_utc, start_local, end_local, now
 
 def build_time_filter(start_iso_z, end_iso_z):
+    """Build the Graph $filter clause for the provided inclusive/exclusive window."""
     # $filter on receivedDateTime (UTC), inclusive start, exclusive end
     # Note: Graph requires single quotes around timestamps
     return f"receivedDateTime ge {start_iso_z!r} and receivedDateTime lt {end_iso_z!r}"
 
 
 def list_messages_in_window(session, mailbox, start_iso_z, end_iso_z):
+    """Yield messages received within the provided UTC window for a mailbox."""
     flt = f"receivedDateTime ge {start_iso_z} and receivedDateTime lt {end_iso_z}"
     base = f"{GRAPH_BASE}/users/{mailbox}/messages"
     params = {
@@ -126,6 +133,7 @@ def list_messages_in_window(session, mailbox, start_iso_z, end_iso_z):
             break
 
 def download_pdf_attachments(session, mailbox, message, outdir):
+    """Download PDF attachments found in the message, returning count saved."""
     if not message.get("hasAttachments"):
         return 0
     mid = message["id"]
@@ -161,6 +169,7 @@ def download_pdf_attachments(session, mailbox, message, outdir):
     return saved
 
 def main():
+    """Coordinate downloading PDF attachments across the scheduled time window."""
     ensure_dir(DOWNLOAD_DIR)
     token = get_app_token()
     session = requests.Session()
