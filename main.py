@@ -166,12 +166,13 @@ def list_messages_in_window(session, mailbox, start_iso_z, end_iso_z, excluded_p
             break
 
 def download_pdf_attachments(session, mailbox, message, bucket, outdir=None):
-    """Download PDF attachments, optionally keep local copies, and upload to GCS."""
+    """Download PDF attachments, optionally keep local copies, and upload to GCS.
+       Yields (filename, bytes) for each downloaded PDF.
+    """
     if not message.get("hasAttachments"):
-        return 0
+        return
     mid = message["id"]
     att_url = f"{GRAPH_BASE}/users/{mailbox}/messages/{mid}/attachments?$top=50"
-    saved = 0
 
     while True:
         data = graph_get(session, att_url)
@@ -194,17 +195,15 @@ def download_pdf_attachments(session, mailbox, message, bucket, outdir=None):
                             with open(fpath, "wb") as f:
                                 f.write(blob)
                         upload_pdf_to_bucket(bucket, fname, blob)
-                        saved += 1
+                        yield fname, blob
             # ItemAttachment could wrap an email with its own attachments; skip here or handle if needed.
 
         att_url = data.get("@odata.nextLink")
         if not att_url:
             break
 
-    return saved
-
 def main():
-    """Coordinate downloading PDF attachments across the scheduled time window."""
+    """Coordinate downloading PDF attachments and return list of (filename, bytes)."""
     local_dir = DOWNLOAD_DIR
     if local_dir:
         ensure_dir(local_dir)
@@ -222,18 +221,21 @@ def main():
         print(f"[INFO] Local cache directory: {os.path.abspath(local_dir)}")
 
     total_msgs = 0
-    total_pdfs = 0
+    downloaded_files = []
 
     excluded_ids = {deleted_items_id}
     for msg in list_messages_in_window(session, MAILBOX, start_iso_z, end_iso_z, excluded_ids):
         total_msgs += 1
-        total_pdfs += download_pdf_attachments(session, MAILBOX, msg, bucket, local_dir)
+        for fname, blob in download_pdf_attachments(session, MAILBOX, msg, bucket, local_dir):
+            downloaded_files.append((fname, blob))
 
     print(f"[INFO] Messages scanned: {total_msgs}")
-    print(f"[INFO] PDF attachments saved: {total_pdfs}")
+    print(f"[INFO] PDF attachments saved: {len(downloaded_files)}")
     print(f"[INFO] Objects available in gs://{GCS_BUCKET_NAME}")
     if local_dir:
         print(f"[INFO] Local cache retained at: {os.path.abspath(local_dir)}")
+    
+    return downloaded_files
 
 if __name__ == "__main__":
     main()

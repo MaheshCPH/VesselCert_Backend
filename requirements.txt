@@ -1,0 +1,5 @@
+streamlit
+requests
+msal
+python-dotenv
+google-cloud-storage

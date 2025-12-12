@@ -1,8 +1,0 @@
-[
-  {
-    "origin": ["https://certifi-952950076125.us-west1.run.app"],
-    "method": ["GET"],
-    "responseHeader": ["Content-Type"],
-    "maxAgeSeconds": 3600
-  }
-]
